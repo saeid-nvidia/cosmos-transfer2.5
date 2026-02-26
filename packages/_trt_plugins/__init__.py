@@ -12,8 +12,22 @@ from .context_registry import get_sm_version, get_a2a_op, get_loc_cp_ranks
 log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
 
+class _FilteredTrtLogger(trt.ILogger):
+    _SUPPRESSED = {"engine plan file across different models"}
+
+    def __init__(self, severity=trt.ILogger.WARNING):
+        super().__init__()
+        self.severity = severity
+
+    def log(self, severity, msg):
+        if severity > self.severity:
+            return
+        if any(s in msg for s in self._SUPPRESSED):
+            return
+        log.log(logging.WARNING if severity == trt.ILogger.WARNING else logging.ERROR, msg)
+
 # Global context variables
-_trt_logger = trt.Logger(trt.Logger.WARNING)
+_trt_logger = _FilteredTrtLogger(trt.ILogger.WARNING)
 trt_runtime = trt.Runtime(_trt_logger)
 pyt_stream = torch.cuda.current_stream()
 trt_stream = torch.cuda.Stream()
