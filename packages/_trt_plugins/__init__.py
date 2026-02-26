@@ -125,14 +125,9 @@ try:
 
         with torch.cuda.stream(ext_stream):
             # Prepare Op
-            if q_t.flatten(0, 1).shape[0] <= 7200:
-                # Sequence is short. Use SDPA->cuDNN
-                op = get_a2a_op(cp_group72, backend="torch")
-            elif get_sm_version(q_t.device.index) // 10 != 10:
-                # Use OSS SageAttention for Ada, Hopper, and RTX Blackwell
-                op = get_a2a_op(cp_group72, backend="sageattn")
+            if get_sm_version(q_t.device.index) // 10 != 10:
+                op = get_a2a_op(cp_group72)
             else:
-                # Use TRTLLM-Gen kernels for B200 & GB200
                 op = get_a2a_op(cp_group72, backend="flashinfer_vx")
 
             # Execute
