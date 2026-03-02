@@ -17,10 +17,10 @@ import attrs
 import torch
 import torch.nn as nn
 
-from cosmos_transfer2._src.imaginaire.config import make_freezable
+# from cosmos_transfer2._src.imaginaire.config import make_freezable
 
 
-@make_freezable
+# @make_freezable
 @attrs.define(slots=False)
 class ModelConfig:
     input_size: int = 1152
