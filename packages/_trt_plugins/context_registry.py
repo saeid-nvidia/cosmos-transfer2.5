@@ -15,6 +15,8 @@ log.setLevel(logging.INFO)
 try:
     if torch.cuda.get_device_capability(0) == (9, 0):
         import sageattention_sm90 as sageattention
+    elif torch.cuda.get_device_capability(0) == (12, 0):
+        import sageattention_rtx6000 as sageattention
     else:
         import sageattention
 except ImportError as e:
