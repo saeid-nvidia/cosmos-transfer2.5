@@ -21,7 +21,6 @@ import torch
 import torchvision.transforms.functional as transforms_F
 from PIL import Image
 from pycocotools import mask as mask_utils
-from skimage.feature import canny as skimage_canny
 
 # Import shared resize utilities from inference utils (avoid code duplication)
 from cosmos_transfer2._src.transfer2.inference.utils import (
@@ -33,33 +32,88 @@ from cosmos_transfer2._src.transfer2.inference.utils import (
 
 
 def _canny_edge(image: np.ndarray, low_threshold: int, high_threshold: int) -> np.ndarray:
-    """Compute Canny edge detection using skimage (cv2.Canny replacement).
-    
-    Args:
-        image: Input grayscale or color image (H, W) or (H, W, C)
-        low_threshold: Lower threshold for edge detection (0-255 scale, will be normalized)
-        high_threshold: Upper threshold for edge detection (0-255 scale, will be normalized)
-    
-    Returns:
-        Edge map as uint8 array (0 or 255)
+    """Reproduce default cv2.Canny semantics using only NumPy.
+
+    The presets were calibrated for OpenCV's 3x3 Sobel, L1 gradient,
+    non-maximum suppression, and hysteresis behavior. Scikit-image applies
+    differently normalized thresholds and produces substantially fewer edges.
     """
-    # Convert to grayscale if needed
+    if image.dtype != np.uint8:
+        raise TypeError(f"Canny input must be uint8, got {image.dtype}")
+    if image.ndim not in (2, 3) or (image.ndim == 3 and image.shape[2] not in (1, 3)):
+        raise ValueError(f"Canny input must be HW, HW1, or HW3, got shape {image.shape}")
+    if image.ndim == 3 and image.shape[2] == 1:
+        image = image[..., 0]
+    if low_threshold > high_threshold:
+        low_threshold, high_threshold = high_threshold, low_threshold
+
+    pad_width = ((1, 1), (1, 1), (0, 0)) if image.ndim == 3 else ((1, 1), (1, 1))
+    padded = np.pad(image, pad_width, mode="edge").astype(np.int16)
+    dx = (
+        padded[:-2, 2:]
+        - padded[:-2, :-2]
+        + 2 * (padded[1:-1, 2:] - padded[1:-1, :-2])
+        + padded[2:, 2:]
+        - padded[2:, :-2]
+    )
+    dy = (
+        padded[2:, :-2]
+        - padded[:-2, :-2]
+        + 2 * (padded[2:, 1:-1] - padded[:-2, 1:-1])
+        + padded[2:, 2:]
+        - padded[:-2, 2:]
+    )
+    magnitude = np.abs(dx).astype(np.int32) + np.abs(dy).astype(np.int32)
+
+    # OpenCV keeps the color channel with the strongest L1 gradient at each
+    # pixel, including that channel's signed derivatives for the orientation.
     if image.ndim == 3:
-        # RGB to grayscale
-        gray = np.dot(image[..., :3], [0.299, 0.587, 0.114]).astype(np.float64)
-    else:
-        gray = image.astype(np.float64)
-    
-    # Normalize thresholds from 0-255 to 0-1 range for skimage
-    # skimage canny uses sigma for gaussian smoothing and thresholds are relative to gradient magnitude
-    low_thresh = low_threshold / 255.0
-    high_thresh = high_threshold / 255.0
-    
-    # Apply canny edge detection
-    edges = skimage_canny(gray / 255.0, sigma=1.0, low_threshold=low_thresh, high_threshold=high_thresh)
-    
-    # Convert boolean to uint8 (0 or 255)
-    return (edges * 255).astype(np.uint8)
+        strongest_index = magnitude.argmax(axis=2)[..., None]
+        magnitude = np.take_along_axis(magnitude, strongest_index, axis=2)[..., 0]
+        dx = np.take_along_axis(dx, strongest_index, axis=2)[..., 0]
+        dy = np.take_along_axis(dy, strongest_index, axis=2)[..., 0]
+
+    magnitudes = np.pad(magnitude, 1, mode="constant")
+    left, right = magnitudes[1:-1, :-2], magnitudes[1:-1, 2:]
+    above, below = magnitudes[:-2, 1:-1], magnitudes[2:, 1:-1]
+    above_left, above_right = magnitudes[:-2, :-2], magnitudes[:-2, 2:]
+    below_left, below_right = magnitudes[2:, :-2], magnitudes[2:, 2:]
+
+    abs_dx = np.abs(dx).astype(np.int32)
+    abs_dy = np.abs(dy).astype(np.int32) << 15
+    tan_22_5_x = abs_dx * 13573
+    horizontal = abs_dy < tan_22_5_x
+    vertical = abs_dy > tan_22_5_x + (abs_dx << 16)
+    diagonal = ~(horizontal | vertical)
+    same_sign = np.bitwise_xor(dx, dy) >= 0
+
+    candidates = (magnitude > low_threshold) & (
+        (horizontal & (magnitude > left) & (magnitude >= right))
+        | (vertical & (magnitude > above) & (magnitude >= below))
+        | (diagonal & same_sign & (magnitude > above_left) & (magnitude > below_right))
+        | (diagonal & ~same_sign & (magnitude > above_right) & (magnitude > below_left))
+    )
+
+    edges = candidates & (magnitude > high_threshold)
+    while True:
+        padded_edges = np.pad(edges, 1, mode="constant")
+        connected = candidates & (
+            padded_edges[:-2, :-2]
+            | padded_edges[:-2, 1:-1]
+            | padded_edges[:-2, 2:]
+            | padded_edges[1:-1, :-2]
+            | padded_edges[1:-1, 1:-1]
+            | padded_edges[1:-1, 2:]
+            | padded_edges[2:, :-2]
+            | padded_edges[2:, 1:-1]
+            | padded_edges[2:, 2:]
+        )
+        new_edges = connected & ~edges
+        if not np.any(new_edges):
+            break
+        edges |= new_edges
+
+    return edges.astype(np.uint8) * 255
 
 from cosmos_transfer2._src.imaginaire.datasets.webdataset.augmentors.augmentor import Augmentor
 from cosmos_transfer2._src.imaginaire.utils import log
