@@ -76,11 +76,9 @@ def apply_bilateral_filter(
 ) -> np.ndarray:
     blurred_image = []
     if bilateral_cuda_module is not None:
-        frames = torch.from_numpy(frames).cuda()
+        frames = torch.from_numpy(frames).cuda(non_blocking=True)
         for _image in frames.permute(1, 2, 3, 0):
-            # The hyper-parameters to NPP version of Bilateral Gaussian blur need to be adjusted.
-            # The chosen values are chosen based on experiments, but it does not guarantee bitwise accuracy.
-            blurred_image.append(bilateral_cuda_module(_image, d // 3, (sigma_color // 2) ** 2, sigma_space**2))
+            blurred_image.append(bilateral_cuda_module(_image, d, sigma_color, sigma_space))
         blurred_image = torch.stack(blurred_image).permute(3, 0, 1, 2)
         blurred_image = blurred_image.cpu().numpy()
         return blurred_image
@@ -92,10 +90,10 @@ def apply_bilateral_filter(
             # sigma_color/255 approximates cv2's behavior, sigma_space is used directly
             _image_float = _image_np.astype(np.float64) / 255.0
             _image_float = denoise_bilateral(
-                _image_float, 
+                _image_float,
                 sigma_color=sigma_color / 255.0,
                 sigma_spatial=sigma_space / 10.0,  # Approximate scaling for similar effect
-                channel_axis=-1 if _image_float.ndim == 3 else None
+                channel_axis=-1 if _image_float.ndim == 3 else None,
             )
             _image_np = (np.clip(_image_float, 0, 1) * 255).astype(np.uint8)
         blurred_image += [_image_np]
@@ -136,10 +134,9 @@ def apply_gaussian_blur(frames: np.ndarray, ksize: int = 5, sigmaX: float = 1.0)
     for _image_np in frames.transpose((1, 2, 3, 0)):
         # Apply gaussian filter to each channel separately if color image
         if _image_np.ndim == 3:
-            blurred = np.stack([
-                gaussian_filter(_image_np[:, :, c], sigma=sigmaX) 
-                for c in range(_image_np.shape[2])
-            ], axis=-1)
+            blurred = np.stack(
+                [gaussian_filter(_image_np[:, :, c], sigma=sigmaX) for c in range(_image_np.shape[2])], axis=-1
+            )
         else:
             blurred = gaussian_filter(_image_np, sigma=sigmaX)
         blurred_image.append(blurred.astype(_image_np.dtype))
@@ -210,7 +207,7 @@ bilateral_blur_config = BlurConfig(
         BlurCombinationConfig(
             blur_types=["bilateral"],
             probability=1.0,
-            bilateral_filter=BilateralFilterConfig(use_random=False),
+            bilateral_filter=BilateralFilterConfig(use_random=False, use_cuda=True),
         ),
     ],
 )
